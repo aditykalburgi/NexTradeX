@@ -1,0 +1,213 @@
+package com.NexTradeX.futures;
+
+import com.NexTradeX.exception.InvalidOrderException;
+import com.NexTradeX.market.MarketService;
+import com.NexTradeX.order.Order;
+import com.NexTradeX.order.OrderRepository;
+import com.NexTradeX.order.OrderSide;
+import com.NexTradeX.order.OrderStatus;
+import com.NexTradeX.order.TradeType;
+import com.NexTradeX.user.User;
+import com.NexTradeX.user.UserService;
+import com.NexTradeX.wallet.WalletService;
+import com.NexTradeX.wallet.WalletType;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.math.BigDecimal;
+import java.math.RoundingMode;
+import java.time.LocalDateTime;
+import java.util.List;
+
+@Slf4j
+@Service
+@RequiredArgsConstructor
+@Transactional
+public class FuturesTradingService {
+    
+    private final FuturesPositionRepository futuresPositionRepository;
+    private final OrderRepository orderRepository;
+    private final UserService userService;
+    private final WalletService walletService;
+    private final MarketService marketService;
+    
+    private static final BigDecimal MAINTENANCE_MARGIN_RATIO = new BigDecimal("0.05"); // 5%
+    private static final BigDecimal INITIAL_MARGIN_RATIO = new BigDecimal("0.10"); // 10%
+    
+    public Order openFuturesPosition(Long userId, String symbol, OrderSide side,
+                                     BigDecimal quantity, BigDecimal leverage) {
+        User user = userService.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        
+        if (quantity.compareTo(BigDecimal.ZERO) <= 0) {
+            throw new InvalidOrderException("Quantity must be greater than zero");
+        }
+        
+        if (leverage.compareTo(BigDecimal.ONE) < 0 || leverage.compareTo(new BigDecimal("20")) > 0) {
+            throw new InvalidOrderException("Leverage must be between 1x and 20x");
+        }
+        
+        BigDecimal entryPrice = marketService.getPrice(symbol).getCurrentPrice();
+        BigDecimal collateral = entryPrice.multiply(quantity).divide(leverage, 8, RoundingMode.HALF_UP);
+        
+        // Check wallet balance
+        var wallet = walletService.getWallet(userId, WalletType.FUTURES);
+        if (!walletService.hasEnoughBalance(wallet.getId(), collateral)) {
+            throw new InvalidOrderException("Insufficient balance for collateral");
+        }
+        
+        // Lock funds
+        walletService.lockFunds(wallet.getId(), collateral);
+        
+        // Create position
+        PositionMode mode = side == OrderSide.BUY ? PositionMode.LONG : PositionMode.SHORT;
+        FuturesPosition position = FuturesPosition.builder()
+                .user(user)
+                .symbol(symbol)
+                .positionMode(mode)
+                .status(PositionStatus.OPEN)
+                .quantity(quantity)
+                .entryPrice(entryPrice)
+                .leverage(leverage)
+                .collateral(collateral)
+                .markPrice(entryPrice)
+                .marginRatio(INITIAL_MARGIN_RATIO)
+                .build();
+        
+        FuturesPosition savedPosition = futuresPositionRepository.save(position);
+        
+        // Create order
+        Order order = Order.builder()
+                .user(user)
+                .symbol(symbol)
+                .side(side)
+                .quantity(quantity)
+                .price(entryPrice)
+                .status(OrderStatus.FILLED)
+                .tradeType(TradeType.FUTURES)
+                .leverage(leverage)
+                .filledQuantity(quantity)
+                .averagePrice(entryPrice)
+                .filledAt(LocalDateTime.now())
+                .build();
+        
+        orderRepository.save(order);
+        
+        log.info("Futures position opened for user {}: {} {} {} {}", userId, symbol, side, quantity, leverage);
+        return order;
+    }
+    
+    public void updatePositionMarkPrice(Long positionId, BigDecimal markPrice) {
+        FuturesPosition position = futuresPositionRepository.findById(positionId)
+                .orElseThrow(() -> new RuntimeException("Position not found"));
+        
+        position.setMarkPrice(markPrice);
+        
+        // Calculate unrealized PnL
+        BigDecimal pnlPerUnit;
+        if (position.getPositionMode() == PositionMode.LONG) {
+            pnlPerUnit = markPrice.subtract(position.getEntryPrice());
+        } else {
+            pnlPerUnit = position.getEntryPrice().subtract(markPrice);
+        }
+        
+        BigDecimal unrealizedPnL = pnlPerUnit.multiply(position.getQuantity());
+        position.setUnrealizedPnL(unrealizedPnL);
+        
+        // Update margin ratio
+        BigDecimal marginRatio = position.getCollateral()
+                .divide(position.getCollateral().add(unrealizedPnL), 4, RoundingMode.HALF_UP);
+        position.setMarginRatio(marginRatio);
+        
+        futuresPositionRepository.save(position);
+        log.debug("Updated mark price for position {}: {}", positionId, markPrice);
+        
+        // Check liquidation
+        if (marginRatio.compareTo(MAINTENANCE_MARGIN_RATIO) < 0) {
+            liquidatePosition(positionId);
+        }
+    }
+    
+    public void closeFuturesPosition(Long positionId, Long userId) {
+        User user = userService.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        
+        FuturesPosition position = futuresPositionRepository.findByIdAndUser(positionId, user)
+                .orElseThrow(() -> new RuntimeException("Position not found"));
+        
+        if (position.getStatus() != PositionStatus.OPEN) {
+            throw new InvalidOrderException("Position is not open");
+        }
+        
+        BigDecimal exitPrice = marketService.getPrice(position.getSymbol()).getCurrentPrice();
+        position.setExitPrice(exitPrice);
+        
+        // Calculate realized PnL
+        BigDecimal pnlPerUnit;
+        if (position.getPositionMode() == PositionMode.LONG) {
+            pnlPerUnit = exitPrice.subtract(position.getEntryPrice());
+        } else {
+            pnlPerUnit = position.getEntryPrice().subtract(exitPrice);
+        }
+        
+        BigDecimal realizedPnL = pnlPerUnit.multiply(position.getQuantity());
+        position.setRealizedPnL(realizedPnL);
+        position.setStatus(PositionStatus.CLOSED);
+        position.setClosedAt(LocalDateTime.now());
+        
+        // Unlock collateral and add PnL
+        var wallet = walletService.getWallet(userId, WalletType.FUTURES);
+        walletService.unlockFunds(wallet.getId(), position.getCollateral());
+        if (realizedPnL.compareTo(BigDecimal.ZERO) > 0) {
+            walletService.updateBalance(wallet.getId(), realizedPnL);
+        } else {
+            walletService.updateBalance(wallet.getId(), realizedPnL);
+        }
+        
+        futuresPositionRepository.save(position);
+        log.info("Futures position closed: {} PnL: {}", positionId, realizedPnL);
+    }
+    
+    public void liquidatePosition(Long positionId) {
+        FuturesPosition position = futuresPositionRepository.findById(positionId)
+                .orElseThrow(() -> new RuntimeException("Position not found"));
+        
+        if (position.getStatus() == PositionStatus.LIQUIDATED) {
+            return;
+        }
+        
+        BigDecimal liquidationPrice = marketService.getPrice(position.getSymbol()).getCurrentPrice();
+        position.setExitPrice(liquidationPrice);
+        position.setStatus(PositionStatus.LIQUIDATED);
+        position.setClosedAt(LocalDateTime.now());
+        position.setRemarks("Position liquidated");
+        
+        // Calculate loss
+        BigDecimal pnlPerUnit;
+        if (position.getPositionMode() == PositionMode.LONG) {
+            pnlPerUnit = liquidationPrice.subtract(position.getEntryPrice());
+        } else {
+            pnlPerUnit = position.getEntryPrice().subtract(liquidationPrice);
+        }
+        
+        BigDecimal realizedPnL = pnlPerUnit.multiply(position.getQuantity());
+        position.setRealizedPnL(realizedPnL);
+        
+        futuresPositionRepository.save(position);
+        log.warn("Position {} liquidated at price {}", positionId, liquidationPrice);
+    }
+    
+    public List<FuturesPosition> getUserOpenPositions(Long userId) {
+        User user = userService.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return futuresPositionRepository.findAllByUserAndStatus(user, PositionStatus.OPEN);
+    }
+    
+    public List<FuturesPosition> getUserAllPositions(Long userId) {
+        User user = userService.findById(userId)
+                .orElseThrow(() -> new RuntimeException("User not found"));
+        return futuresPositionRepository.findAllByUser(user);
+    }
+}

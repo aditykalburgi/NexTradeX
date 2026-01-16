@@ -1,0 +1,95 @@
+package com.NexTradeX.futures;
+
+import com.NexTradeX.common.ApiResponse;
+import com.NexTradeX.dto.FuturesOrderRequest;
+import com.NexTradeX.order.OrderResponse;
+import com.NexTradeX.order.OrderSide;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.http.HttpStatus;
+import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.Authentication;
+import org.springframework.web.bind.annotation.*;
+
+import jakarta.validation.Valid;
+import java.util.List;
+import java.util.stream.Collectors;
+
+@Slf4j
+@RestController
+@RequestMapping("/api/futures")
+@RequiredArgsConstructor
+public class FuturesController {
+    
+    private final FuturesTradingService futuresTradingService;
+    
+    @PostMapping("/open")
+    public ResponseEntity<ApiResponse<OrderResponse>> openPosition(
+            @Valid @RequestBody FuturesOrderRequest request,
+            Authentication authentication) {
+        try {
+            Long userId = extractUserIdFromAuth(authentication);
+            OrderSide side = OrderSide.valueOf(request.getSide().toUpperCase());
+            
+            var order = futuresTradingService.openFuturesPosition(
+                    userId, request.getSymbol(), side, 
+                    request.getQuantity(), request.getLeverage());
+            
+            return ResponseEntity.status(HttpStatus.CREATED)
+                    .body(new ApiResponse<>(201, "Futures position opened", toOrderResponse(order)));
+        } catch (Exception e) {
+            log.error("Error opening futures position: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(new ApiResponse<>(400, e.getMessage(), null));
+        }
+    }
+    
+    @GetMapping("/positions/open")
+    public ResponseEntity<ApiResponse<List<FuturesPositionDTO>>> getOpenPositions(
+            Authentication authentication) {
+        try {
+            Long userId = extractUserIdFromAuth(authentication);
+            List<FuturesPosition> positions = futuresTradingService.getUserOpenPositions(userId);
+            List<FuturesPositionDTO> dtos = positions.stream()
+                    .map(this::toDTO)
+                    .collect(Collectors.toList());
+            
+            return ResponseEntity.ok()
+                    .body(new ApiResponse<>(200, "Open positions retrieved", dtos));
+        } catch (Exception e) {
+            log.error("Error retrieving open positions: {}", e.getMessage());
+            return ResponseEntity.badRequest()
+                    .body(new ApiResponse<>(400, e.getMessage(), null));
+        }
+    }
+    
+    private OrderResponse toOrderResponse(com.NexTradeX.order.Order order) {
+        return OrderResponse.builder()
+                .id(order.getId())
+                .symbol(order.getSymbol())
+                .side(order.getSide().name())
+                .status(order.getStatus().name())
+                .quantity(order.getQuantity())
+                .price(order.getPrice())
+                .leverage(order.getLeverage())
+                .build();
+    }
+    
+    private FuturesPositionDTO toDTO(FuturesPosition position) {
+        return FuturesPositionDTO.builder()
+                .id(position.getId())
+                .symbol(position.getSymbol())
+                .positionMode(position.getPositionMode().name())
+                .quantity(position.getQuantity())
+                .entryPrice(position.getEntryPrice())
+                .markPrice(position.getMarkPrice())
+                .unrealizedPnL(position.getUnrealizedPnL())
+                .leverage(position.getLeverage())
+                .marginRatio(position.getMarginRatio())
+                .build();
+    }
+    
+    private Long extractUserIdFromAuth(Authentication authentication) {
+        return 1L;
+    }
+}
