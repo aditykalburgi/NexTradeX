@@ -1,14 +1,16 @@
 package com.NexTradeX.auth;
 
-import com.NexTradeX.user.User;
-import com.NexTradeX.user.UserService;
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
 import org.springframework.security.core.userdetails.UserDetails;
 import org.springframework.security.core.userdetails.UserDetailsService;
 import org.springframework.security.core.userdetails.UsernameNotFoundException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
+import com.NexTradeX.user.User;
+import com.NexTradeX.user.UserService;
+
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Service
@@ -66,9 +68,7 @@ public class AuthService implements UserDetailsService {
                 .username(user.getUsername())
                 .password(user.getPasswordHash())
                 .authorities("ROLE_" + user.getRole().name())
-                .accountNonExpired(true)
-                .accountNonLocked(user.getActive())
-                .credentialsNonExpired(true)
+                .accountLocked(!user.getActive())
                 .disabled(!user.getActive())
                 .build();
     }

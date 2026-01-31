@@ -1,16 +1,17 @@
 package com.NexTradeX.market;
 
-import lombok.RequiredArgsConstructor;
-import lombok.extern.slf4j.Slf4j;
+import java.math.BigDecimal;
+import java.time.LocalDateTime;
+import java.util.List;
+import java.util.Optional;
+
+import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.web.client.RestTemplate;
 
-import java.math.BigDecimal;
-import java.time.LocalDateTime;
-import java.util.List;
-import java.util.Map;
-import java.util.Optional;
+import lombok.RequiredArgsConstructor;
+import lombok.extern.slf4j.Slf4j;
 
 @Slf4j
 @Service
@@ -21,7 +22,10 @@ public class MarketService {
     private final CryptoPriceRepository cryptoPriceRepository;
     private final RestTemplate restTemplate;
     
-    private static final String COINGECKO_API = "https://api.coingecko.com/api/v3";
+    @Value("${coinmarketcap.api.key}")
+    private String coinMarketCapApiKey;
+    
+    private static final String COINMARKETCAP_API = "https://pro-api.coinmarketcap.com/v1/cryptocurrency/quotes/latest";
     
     public CryptoPrice getPrice(String symbol) {
         return cryptoPriceRepository.findBySymbol(symbol)
@@ -116,5 +120,22 @@ public class MarketService {
                     BigDecimal.valueOf(3_000_000_000L),
                     BigDecimal.valueOf(94_000_000_000L));
         }
+    }
+    
+    /**
+     * Fetch price data from CoinMarketCap for a given symbol (e.g., BTC, ETH).
+     */
+    public String fetchCoinMarketCapPrice(String symbol) {
+        String url = COINMARKETCAP_API + "?symbol=" + symbol;
+        org.springframework.http.HttpHeaders headers = new org.springframework.http.HttpHeaders();
+        headers.set("X-CMC_PRO_API_KEY", coinMarketCapApiKey);
+        org.springframework.http.HttpEntity<String> entity = new org.springframework.http.HttpEntity<>(headers);
+        org.springframework.http.ResponseEntity<String> response = restTemplate.exchange(
+                url,
+                org.springframework.http.HttpMethod.GET,
+                entity,
+                String.class
+        );
+        return response.getBody();
     }
 }

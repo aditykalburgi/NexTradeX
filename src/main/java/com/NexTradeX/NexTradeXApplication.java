@@ -1,16 +1,17 @@
 package com.NexTradeX;
 
-import com.NexTradeX.market.MarketService;
-import com.NexTradeX.user.User;
-import com.NexTradeX.user.UserService;
-import com.NexTradeX.wallet.WalletService;
-import lombok.RequiredArgsConstructor;
 import org.springframework.boot.CommandLineRunner;
 import org.springframework.boot.SpringApplication;
 import org.springframework.boot.autoconfigure.SpringBootApplication;
 import org.springframework.context.annotation.Bean;
 import org.springframework.scheduling.annotation.EnableScheduling;
-import org.springframework.web.client.RestTemplate;
+
+import com.NexTradeX.market.MarketService;
+import com.NexTradeX.user.User;
+import com.NexTradeX.user.UserService;
+import com.NexTradeX.wallet.WalletService;
+
+import lombok.RequiredArgsConstructor;
 
 @SpringBootApplication
 @EnableScheduling
@@ -25,10 +26,6 @@ public class NexTradeXApplication {
 		SpringApplication.run(NexTradeXApplication.class, args);
 	}
 	
-	@Bean
-	public RestTemplate restTemplate() {
-	    return new RestTemplate();
-	}
 	
 	@Bean
 	public CommandLineRunner init() {
